@@ -3,132 +3,305 @@ import fs from "fs/promises";
 import path from "path";
 import os from "os";
 
-// Helper function to recursively search directories
-async function searchFiles(dir: string, designNos: string[]): Promise<{ itemPath: string, matchedDesign: string, isDirectory: boolean }[]> {
-  const results: { itemPath: string, matchedDesign: string, isDirectory: boolean }[] = [];
-  
+interface Item {
+  designNo: string;
+  qty: string;
+}
+
+interface SearchResult {
+  itemPath: string;
+  matchedDesign: string;
+  isDirectory: boolean;
+}
+
+// Recursive search
+async function searchFiles(
+  dir: string,
+  designNos: string[]
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = [];
+
   try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    
+    const entries = await fs.readdir(dir, {
+      withFileTypes: true,
+    });
+
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      
+
       let matched = false;
-      // Check if filename or foldername contains any design number
+
       for (const designNo of designNos) {
-        if (entry.name.includes(designNo)) {
-          results.push({ itemPath: fullPath, matchedDesign: designNo, isDirectory: entry.isDirectory() });
+        if (
+          entry.name
+            .toLowerCase()
+            .includes(designNo.toLowerCase())
+        ) {
+          results.push({
+            itemPath: fullPath,
+            matchedDesign: designNo,
+            isDirectory: entry.isDirectory(),
+          });
+
           matched = true;
           break;
         }
       }
-      
+
       if (entry.isDirectory()) {
-        // Skip hidden directories and common large ones to speed up search
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-        
-        // If the directory matched, we copy the whole directory, so no need to search inside it
+        if (
+          entry.name.startsWith(".") ||
+          entry.name === "node_modules"
+        ) {
+          continue;
+        }
+
         if (!matched) {
-          const subResults = await searchFiles(fullPath, designNos);
+          const subResults = await searchFiles(
+            fullPath,
+            designNos
+          );
+
           results.push(...subResults);
         }
       }
     }
   } catch (err) {
-    console.error(`Error reading directory ${dir}:`, err);
+    console.error(
+      `Error reading directory ${dir}:`,
+      err
+    );
   }
-  
+
   return results;
 }
 
 export async function POST(req: Request) {
   try {
-    const { designNos } = await req.json();
-    
-    if (!designNos || !Array.isArray(designNos) || designNos.length === 0) {
-      return NextResponse.json({ error: "Invalid or empty design numbers array" }, { status: 400 });
+    const { items }: { items: Item[] } =
+      await req.json();
+
+    if (
+      !items ||
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
+      return NextResponse.json(
+        {
+          error: "Invalid or empty items array",
+        },
+        { status: 400 }
+      );
     }
 
-    // 1. Determine Search Directories
-    const searchDirsRaw = process.env.SEARCH_DIRECTORIES || "";
-    // Handle both comma and semicolon separated paths, and trim quotes
+    const designNos = items.map(
+      (item) => item.designNo
+    );
+
+    const qtyMap = new Map<string, number>();
+
+    for (const item of items) {
+      qtyMap.set(
+        item.designNo,
+        Number(item.qty || "1")
+      );
+    }
+
+    // Search directories from env
+    const searchDirsRaw =
+      process.env.SEARCH_DIRECTORIES || "";
+
     const searchDirs = searchDirsRaw
-      .replace(/^["']|["']$/g, "") // remove surrounding quotes if any
+      .replace(/^["']|["']$/g, "")
       .split(";")
-      .flatMap(d => d.split(",")) 
-      .map(d => d.trim())
-      .filter(d => d.length > 0);
+      .flatMap((d) => d.split(","))
+      .map((d) => d.trim())
+      .filter(Boolean);
 
     if (searchDirs.length === 0) {
-      return NextResponse.json({ error: "No SEARCH_DIRECTORIES configured in environment" }, { status: 500 });
+      return NextResponse.json(
+        {
+          error:
+            "No SEARCH_DIRECTORIES configured",
+        },
+        { status: 500 }
+      );
     }
 
-    // 2. Prepare Output Directory on Desktop
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    // Create output folder
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-");
+
     const orderFolderName = `Order_${timestamp}`;
-    const desktopPath = path.join(os.homedir(), "Desktop");
-    const outputFolderPath = path.join(desktopPath, orderFolderName);
-    
-    const foundFolderPath = path.join(outputFolderPath, "Found");
-    const notFoundFolderPath = path.join(outputFolderPath, "Not_Found");
 
-    await fs.mkdir(outputFolderPath, { recursive: true });
-    await fs.mkdir(foundFolderPath, { recursive: true });
-    await fs.mkdir(notFoundFolderPath, { recursive: true });
+    const desktopPath = path.join(
+      os.homedir(),
+      "Desktop"
+    );
 
-    // 3. Search for files
-    const allFoundFiles: { itemPath: string, matchedDesign: string, isDirectory: boolean }[] = [];
+    const outputFolderPath = path.join(
+      desktopPath,
+      orderFolderName
+    );
+
+    const foundFolderPath = path.join(
+      outputFolderPath,
+      "Found"
+    );
+
+    const notFoundFolderPath = path.join(
+      outputFolderPath,
+      "Not_Found"
+    );
+
+    await fs.mkdir(foundFolderPath, {
+      recursive: true,
+    });
+
+    await fs.mkdir(notFoundFolderPath, {
+      recursive: true,
+    });
+
+    // Search all directories
+    const allFoundFiles: SearchResult[] = [];
+
     for (const searchDir of searchDirs) {
       try {
         const stats = await fs.stat(searchDir);
+
         if (stats.isDirectory()) {
-          const found = await searchFiles(searchDir, designNos);
+          const found = await searchFiles(
+            searchDir,
+            designNos
+          );
+
           allFoundFiles.push(...found);
         }
-      } catch (e) {
-        console.error(`Search directory invalid or inaccessible: ${searchDir}`, e);
+      } catch (err) {
+        console.error(
+          `Invalid search directory: ${searchDir}`,
+          err
+        );
       }
     }
 
-    // 4. Copy files and determine missing
     const foundDesignNos = new Set<string>();
+
     let copiedCount = 0;
 
-    for (const { itemPath, matchedDesign, isDirectory } of allFoundFiles) {
-      const itemName = path.basename(itemPath);
-      const destPath = path.join(foundFolderPath, itemName);
+    // Copy results
+    for (const result of allFoundFiles) {
+      const {
+        itemPath,
+        matchedDesign,
+        isDirectory,
+      } = result;
+
       try {
-        if (isDirectory) {
-          await fs.cp(itemPath, destPath, { recursive: true });
-        } else {
-          await fs.copyFile(itemPath, destPath);
+        const qty =
+          qtyMap.get(matchedDesign) || 1;
+
+        const originalName =
+          path.basename(itemPath);
+
+        const ext =
+          path.extname(originalName);
+
+        const baseName =
+          path.basename(
+            originalName,
+            ext
+          );
+
+        for (
+          let i = 1;
+          i <= qty;
+          i++
+        ) {
+          const copyName =
+            qty > 1
+              ? `${baseName}-${i}${ext}`
+              : originalName;
+
+          const destPath = path.join(
+            foundFolderPath,
+            copyName
+          );
+
+          if (isDirectory) {
+            await fs.cp(
+              itemPath,
+              destPath,
+              {
+                recursive: true,
+              }
+            );
+          } else {
+            await fs.copyFile(
+              itemPath,
+              destPath
+            );
+          }
+
+          copiedCount++;
         }
-        foundDesignNos.add(matchedDesign);
-        copiedCount++;
+
+        foundDesignNos.add(
+          matchedDesign
+        );
       } catch (err) {
-        console.error(`Failed to copy ${itemPath} to ${destPath}:`, err);
+        console.error(
+          `Failed copying ${itemPath}`,
+          err
+        );
       }
     }
 
-    // 5. Generate Missing Designs Report
-    const missingDesignNos = designNos.filter(d => !foundDesignNos.has(d));
-    if (missingDesignNos.length > 0) {
-      const reportPath = path.join(notFoundFolderPath, "Missing_Designs.txt");
-      const reportContent = `Missing Designs:\n\n${missingDesignNos.join("\n")}`;
-      await fs.writeFile(reportPath, reportContent, "utf-8");
+    // Missing designs
+    const missingDesignNos =
+      designNos.filter(
+        (d) => !foundDesignNos.has(d)
+      );
+
+    if (
+      missingDesignNos.length > 0
+    ) {
+      const reportPath =
+        path.join(
+          notFoundFolderPath,
+          "Missing_Designs.txt"
+        );
+
+      await fs.writeFile(
+        reportPath,
+        missingDesignNos.join("\n"),
+        "utf8"
+      );
     }
 
-    return NextResponse.json({ 
-      success: true, 
+    return NextResponse.json({
+      success: true,
       folderName: orderFolderName,
       desktopPath: outputFolderPath,
       copiedCount,
-      missingCount: missingDesignNos.length,
-      missingDesigns: missingDesignNos
+      missingCount:
+        missingDesignNos.length,
+      missingDesigns:
+        missingDesignNos,
     });
-
   } catch (error) {
-    console.error("Gather files error:", error);
-    return NextResponse.json({ error: "Failed to gather files" }, { status: 500 });
+    console.error(
+      "Gather files error:",
+      error
+    );
+
+    return NextResponse.json(
+      {
+        error:
+          "Failed to gather files",
+      },
+      { status: 500 }
+    );
   }
 }

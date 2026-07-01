@@ -16,6 +16,7 @@ export default function PDFExtractor() {
   const [data, setData] = useState<ExtractedItem[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [exporting, setExporting] = useState<boolean>(false);
+  const [dragActive, setDragActive] = useState(false);
   const [fileName, setFileName] = useState<string>("");
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; title: string } | null>(null);
@@ -33,61 +34,115 @@ export default function PDFExtractor() {
     scope: "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file",
   });
 
-  // ── PDF Parsing ───────────────────────────────────────────────────────────────
-  const parsePDFText = (text: string) => {
-    const items: ExtractedItem[] = [];
-    const seen = new Set<string>();
-
-    const designRegex = /\b(TR[A-Z]{2}\d{3})\b/g;
-    const matches = text.matchAll(designRegex);
-
-    for (const match of matches) {
-      const designNo = match[1];
-      if (!seen.has(designNo)) {
-        seen.add(designNo);
-        items.push({ designNo, qty: "1" });
-      }
-    }
-
-    return items;
-  };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const processPDF = async (file: File) => {
     setLoading(true);
     setFileName(file.name);
     setError(null);
 
     try {
       const pdfjsLib = await import("pdfjs-dist");
+
       pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
         "pdfjs-dist/build/pdf.worker.min.mjs",
         import.meta.url
       ).toString();
 
       const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      let fullText = "";
 
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
+      const pdf = await pdfjsLib.getDocument({
+        data: arrayBuffer,
+      }).promise;
+
+      const designItems: string[] = [];
+
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        const page = await pdf.getPage(pageNo);
+
         const textContent = await page.getTextContent();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const pageText = textContent.items.map((item: any) => item.str).join(" ");
-        fullText += pageText + "\n";
+
+        textContent.items.forEach((item: any) => {
+          const text = item.str.trim();
+
+          if (!text) return;
+
+          const x = item.transform[4];
+
+          // Design No column
+          if (x >= 160 && x <= 180) {
+            designItems.push(text);
+          }
+        });
       }
 
-      const items = parsePDFText(fullText);
+      const items = parsePDFText(designItems);
+
       setData(items);
       setExportResult(null);
     } catch (err) {
-      console.error("Error reading PDF:", err);
-      setError("Failed to read PDF. Make sure it is a text-based PDF.");
+      console.error(err);
+      setError("Failed to read PDF.");
     } finally {
       setLoading(false);
     }
+  };
+
+  // ── PDF Parsing ───────────────────────────────────────────────────────────────
+  const parsePDFText = (designItems: string[]) => {
+    const qtyMap = new Map<string, number>();
+
+    for (let designNo of designItems) {
+      designNo = designNo.trim();
+
+      if (!designNo) continue;
+
+      // Ignore the table header
+      if (designNo === "Design No.") continue;
+
+      // Same normalization logic
+      // DZGR26565 -> DZGR-26565
+      if (designNo.startsWith("DZ") && !designNo.includes("-")) {
+        designNo = designNo.replace(/^([A-Z]{4})(\d+)$/, "$1-$2");
+      }
+
+      // WH26565 -> WH-26565
+      if (designNo.startsWith("WH") && !designNo.includes("-")) {
+        designNo = designNo.replace(/^([A-Z]{2})(\d+)$/, "$1-$2");
+      }
+
+      // Same validation
+      if (!/^[A-Z]{2,6}-?\d+$/.test(designNo)) continue;
+
+      qtyMap.set(designNo, (qtyMap.get(designNo) || 0) + 1);
+    }
+
+    return Array.from(qtyMap.entries()).map(([designNo, qty]) => ({
+      designNo,
+      qty: qty.toString(),
+    }));
+  };
+
+  const handleDrop = async (
+    e: React.DragEvent<HTMLDivElement>
+  ) => {
+    e.preventDefault();
+    setDragActive(false);
+
+    const file = e.dataTransfer.files?.[0];
+
+    if (file && file.type === "application/pdf") {
+      await processPDF(file);
+    }
+  };
+
+  const handleDragOver = (
+    e: React.DragEvent<HTMLDivElement>
+  ) => {
+    e.preventDefault();
+    setDragActive(true);
+  };
+
+  const handleDragLeave = () => {
+    setDragActive(false);
   };
 
   // ── Export to Google Sheets ───────────────────────────────────────────────────
@@ -148,9 +203,14 @@ export default function PDFExtractor() {
     try {
       const response = await fetch("/api/gather-files", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
-          designNos: data.map((item) => item.designNo),
+          items: data.map((item) => ({
+            designNo: item.designNo,
+            qty: item.qty,
+          })),
         }),
       });
 
@@ -173,6 +233,21 @@ export default function PDFExtractor() {
       setGathering(false);
     }
   };
+
+  const handleFileUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    await processPDF(file);
+  };
+
+  const totalQty = data.reduce(
+    (sum, item) => sum + Number(item.qty || 0),
+    0
+  );
 
   return (
     <div className="container mx-auto p-6 max-w-4xl space-y-6">
@@ -206,32 +281,39 @@ export default function PDFExtractor() {
       </div>
 
       {/* Upload Area */}
-      <Card className="border-dashed border-2">
+      <Card
+        className={`border-2 border-dashed cursor-pointer transition-all ${dragActive
+          ? "border-primary bg-primary/5"
+          : "border-muted"
+          }`}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+      >
         <CardContent className="flex flex-col items-center justify-center p-10 space-y-4 text-center">
-          <div className="p-4 bg-primary/10 rounded-full text-primary">
-            {loading ? <RefreshCw className="h-8 w-8 animate-spin" /> : <Upload className="h-8 w-8" />}
-          </div>
-          <div className="space-y-1">
-            <p className="font-medium text-sm">
-              {fileName ? `Selected: ${fileName}` : "Click to upload your order PDF"}
+          <Upload className="h-10 w-10 text-primary" />
+
+          <div>
+            <p className="font-medium">
+              Drag & Drop PDF Here
             </p>
-            <p className="text-xs text-muted-foreground">
-              Extracts Design Numbers like TRBL011, TRTP016 from text-based PDFs
+
+            <p className="text-sm text-muted-foreground">
+              or click below to select a file
             </p>
           </div>
+
           <label htmlFor="pdf-upload">
-            <Button asChild variant={fileName ? "secondary" : "default"} disabled={loading}>
-              <span>
-                {loading ? "Processing..." : fileName ? "Change File" : "Choose File"}
-              </span>
+            <Button asChild>
+              <span>Choose PDF</span>
             </Button>
+
             <input
               id="pdf-upload"
               type="file"
               accept=".pdf"
               className="hidden"
               onChange={handleFileUpload}
-              disabled={loading}
             />
           </label>
         </CardContent>
@@ -329,6 +411,12 @@ export default function PDFExtractor() {
                   ))}
                 </TableBody>
               </Table>
+              <div className="mt-4 flex ">
+                <div className="rounded-md border px-4 py-2 bg-muted/30">
+                  <span className="font-medium">Total : </span>
+                  <span className="font-bold text-lg">{totalQty}</span>
+                </div>
+              </div>
             </div>
           </CardContent>
         </Card>
