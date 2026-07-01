@@ -98,15 +98,14 @@ export default function PDFExtractor() {
       // Ignore the table header
       if (designNo === "Design No.") continue;
 
-      // Same normalization logic
+      // Add hyphen only for WH and DZ* families
+      // Examples:
+      // WH26565   -> WH-26565
       // DZGR26565 -> DZGR-26565
-      if (designNo.startsWith("DZ") && !designNo.includes("-")) {
-        designNo = designNo.replace(/^([A-Z]{4})(\d+)$/, "$1-$2");
-      }
+      // DZER12345 -> DZER-12345
 
-      // WH26565 -> WH-26565
-      if (designNo.startsWith("WH") && !designNo.includes("-")) {
-        designNo = designNo.replace(/^([A-Z]{2})(\d+)$/, "$1-$2");
+      if (!designNo.includes("-") && /^(WH|DZ)/.test(designNo)) {
+        designNo = designNo.replace(/^([A-Z]+)(\d+)$/, "$1-$2");
       }
 
       // Same validation
