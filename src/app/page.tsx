@@ -21,6 +21,8 @@ export default function PDFExtractor() {
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; title: string } | null>(null);
   const [gathering, setGathering] = useState<boolean>(false);
+  const [pasteInput, setPasteInput] = useState<string>("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
   const [gatherResult, setGatherResult] = useState<{ folderName: string, copiedCount: number, missingCount: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -123,7 +125,6 @@ export default function PDFExtractor() {
   const handleDrop = async (
     e: React.DragEvent<HTMLDivElement>
   ) => {
-    e.preventDefault();
     setDragActive(false);
 
     const file = e.dataTransfer.files?.[0];
@@ -248,6 +249,29 @@ export default function PDFExtractor() {
     0
   );
 
+const handlePasteSearch = () => {
+  setPasteError(null);
+
+  const lines = pasteInput
+    .split(/[\n,]+/)
+    .map((l) => l.replace(/\.[a-zA-Z0-9]+$/, "").trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    setPasteError("Please paste at least one Design No.");
+    return;
+  }
+
+  const items: ExtractedItem[] = lines.map((designNo) => ({
+    designNo,
+    qty: "1",
+  }));
+
+  setData(items);
+  setFileName("manual-paste");
+  setExportResult(null);
+};
+
   return (
     <div className="container mx-auto p-6 max-w-4xl space-y-6">
       <header className="space-y-2 text-center sm:text-left">
@@ -317,6 +341,30 @@ export default function PDFExtractor() {
           </label>
         </CardContent>
       </Card>
+
+      <Card>
+  <CardHeader className="pb-3">
+    <CardTitle className="text-base">Or paste Design Numbers manually</CardTitle>
+    <CardDescription>One per line, or comma-separated. e.g. DZER-11742, TRBL-008</CardDescription>
+  </CardHeader>
+  <CardContent className="space-y-3">
+    <textarea
+      value={pasteInput}
+      onChange={(e) => setPasteInput(e.target.value)}
+      placeholder={"DZER-11742\nDZER-11743\nTRBL-008"}
+      rows={4}
+      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary"
+    />
+    {pasteError && (
+      <p className={`text-xs ${pasteError.startsWith("Loaded") ? "text-amber-600" : "text-red-600"}`}>
+        {pasteError}
+      </p>
+    )}
+    <Button onClick={handlePasteSearch} className="w-full sm:w-auto">
+      Find these items
+    </Button>
+  </CardContent>
+</Card>
 
       {/* Error */}
       {error && (
