@@ -55,30 +55,94 @@ export default function PDFExtractor() {
         data: arrayBuffer,
       }).promise;
 
-      const designItems: string[] = [];
+      let designColumnX: number | null = null;
+      let qtyColumnX: number | null = null;
+
+      const DESIGN_TOLERANCE = 35;
+      const QTY_TOLERANCE = 15;
+      const ROW_TOLERANCE = 2;
+
+      const rows: {
+        designNo: string;
+        qty: string;
+      }[] = [];
 
       for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
         const page = await pdf.getPage(pageNo);
-
         const textContent = await page.getTextContent();
+        const items = textContent.items as any[];
 
-        textContent.items.forEach((item: any) => {
+        // Detect headers once
+        if (designColumnX === null || qtyColumnX === null) {
+          for (const item of items) {
+            const text = item.str.trim();
+
+            if (text === "Design No.") {
+              designColumnX = item.transform[4];
+              console.log(designColumnX);
+              
+            }
+
+            if (text === "Qty") {
+              qtyColumnX = item.transform[4];
+            }
+          }
+        }
+
+        if (designColumnX === null || qtyColumnX === null) {
+          continue;
+        }
+
+        const rowMap = new Map<
+          number,
+          {
+            designNo?: string;
+            qty?: string;
+          }
+        >();
+
+        for (const item of items) {
           const text = item.str.trim();
 
-          if (!text) return;
+          if (!text) continue;
 
           const x = item.transform[4];
+          const y = Number(item.transform[5].toFixed(1));
 
-          // Design No column
-          if (x >= 160 && x <= 180) {
-            designItems.push(text);
+          // Find nearby row (handles tiny Y differences)
+          let rowKey = [...rowMap.keys()].find(
+            (k) => Math.abs(k - y) <= ROW_TOLERANCE
+          );
+
+          if (rowKey === undefined) {
+            rowKey = y;
+            rowMap.set(rowKey, {});
           }
-        });
+
+          const row = rowMap.get(rowKey)!;
+
+          if (Math.abs(x - designColumnX) <= DESIGN_TOLERANCE) {
+            row.designNo = text;
+          }
+
+          if (Math.abs(x - qtyColumnX) <= QTY_TOLERANCE) {
+            row.qty = text;
+          }
+        }
+
+        for (const row of rowMap.values()) {
+          if (!row.designNo) continue;
+
+          rows.push({
+            designNo: row.designNo,
+            qty: row.qty ?? "1",
+          });
+        }
       }
 
-      const items = parsePDFText(designItems);
+      const parsed = parsePDFRows(rows);
 
-      setData(items);
+      setData(parsed);
       setExportResult(null);
     } catch (err) {
       console.error(err);
@@ -89,37 +153,51 @@ export default function PDFExtractor() {
   };
 
   // ── PDF Parsing ───────────────────────────────────────────────────────────────
-  const parsePDFText = (designItems: string[]) => {
-    const qtyMap = new Map<string, number>();
+  const parsePDFRows = (
+    rows: {
+      designNo: string;
+      qty: string;
+    }[]
+  ) => {
+    return rows
+      .map((row) => {
+        let designNo = row.designNo.trim();
 
-    for (let designNo of designItems) {
-      designNo = designNo.trim();
+        if (!designNo || designNo === "Design No.") {
+          return null;
+        }
 
-      if (!designNo) continue;
+        // Remove ".jpg..."
+        designNo = designNo.replace(/\.jpg.*$/i, "");
 
-      // Ignore the table header
-      if (designNo === "Design No.") continue;
+        // Remove "-c"
+        designNo = designNo.replace(/-c$/i, "");
 
-      // Add hyphen only for WH and DZ* families
-      // Examples:
-      // WH26565   -> WH-26565
-      // DZGR26565 -> DZGR-26565
-      // DZER12345 -> DZER-12345
+        // WH12614 -> WH-12614
+        // DZER12614 -> DZER-12614
+        if (/^(WH|DZ)/i.test(designNo) && !designNo.includes("-")) {
+          designNo = designNo.replace(
+            /^([A-Za-z]+)(\d+)$/,
+            "$1-$2"
+          );
+        }
 
-      if (!designNo.includes("-") && /^(WH|DZ)/.test(designNo)) {
-        designNo = designNo.replace(/^([A-Z]+)(\d+)$/, "$1-$2");
-      }
+        // Validate
+        if (!/^[A-Za-z]{2,6}-?\d+$/.test(designNo)) {
+          return null;
+        }
 
-      // Same validation
-      if (!/^[A-Z]{2,6}-?\d+$/.test(designNo)) continue;
+        const qty = parseInt(row.qty, 10);
 
-      qtyMap.set(designNo, (qtyMap.get(designNo) || 0) + 1);
-    }
-
-    return Array.from(qtyMap.entries()).map(([designNo, qty]) => ({
-      designNo,
-      qty: qty.toString(),
-    }));
+        return {
+          designNo,
+          qty: Number.isNaN(qty) ? "1" : qty.toString(),
+        };
+      })
+      .filter(Boolean) as {
+        designNo: string;
+        qty: string;
+      }[];
   };
 
   const handleDrop = async (
@@ -249,28 +327,28 @@ export default function PDFExtractor() {
     0
   );
 
-const handlePasteSearch = () => {
-  setPasteError(null);
+  const handlePasteSearch = () => {
+    setPasteError(null);
 
-  const lines = pasteInput
-    .split(/[\n,]+/)
-    .map((l) => l.replace(/\.[a-zA-Z0-9]+$/, "").trim())
-    .filter(Boolean);
+    const lines = pasteInput
+      .split(/[\n,]+/)
+      .map((l) => l.replace(/\.[a-zA-Z0-9]+$/, "").trim())
+      .filter(Boolean);
 
-  if (lines.length === 0) {
-    setPasteError("Please paste at least one Design No.");
-    return;
-  }
+    if (lines.length === 0) {
+      setPasteError("Please paste at least one Design No.");
+      return;
+    }
 
-  const items: ExtractedItem[] = lines.map((designNo) => ({
-    designNo,
-    qty: "1",
-  }));
+    const items: ExtractedItem[] = lines.map((designNo) => ({
+      designNo,
+      qty: "1",
+    }));
 
-  setData(items);
-  setFileName("manual-paste");
-  setExportResult(null);
-};
+    setData(items);
+    setFileName("manual-paste");
+    setExportResult(null);
+  };
 
   return (
     <div className="container mx-auto p-6 max-w-4xl space-y-6">
@@ -343,28 +421,28 @@ const handlePasteSearch = () => {
       </Card>
 
       <Card>
-  <CardHeader className="pb-3">
-    <CardTitle className="text-base">Or paste Design Numbers manually</CardTitle>
-    <CardDescription>One per line, or comma-separated. e.g. DZER-11742, TRBL-008</CardDescription>
-  </CardHeader>
-  <CardContent className="space-y-3">
-    <textarea
-      value={pasteInput}
-      onChange={(e) => setPasteInput(e.target.value)}
-      placeholder={"DZER-11742\nDZER-11743\nTRBL-008"}
-      rows={4}
-      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary"
-    />
-    {pasteError && (
-      <p className={`text-xs ${pasteError.startsWith("Loaded") ? "text-amber-600" : "text-red-600"}`}>
-        {pasteError}
-      </p>
-    )}
-    <Button onClick={handlePasteSearch} className="w-full sm:w-auto">
-      Find these items
-    </Button>
-  </CardContent>
-</Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Or paste Design Numbers manually</CardTitle>
+          <CardDescription>One per line, or comma-separated. e.g. DZER-11742, TRBL-008</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <textarea
+            value={pasteInput}
+            onChange={(e) => setPasteInput(e.target.value)}
+            placeholder={"DZER-11742\nDZER-11743\nTRBL-008"}
+            rows={4}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          {pasteError && (
+            <p className={`text-xs ${pasteError.startsWith("Loaded") ? "text-amber-600" : "text-red-600"}`}>
+              {pasteError}
+            </p>
+          )}
+          <Button onClick={handlePasteSearch} className="w-full sm:w-auto">
+            Find these items
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* Error */}
       {error && (
